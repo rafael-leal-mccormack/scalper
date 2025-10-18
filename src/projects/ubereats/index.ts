@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Browser } from "@/core/Browser";
 import { Page } from "puppeteer";
-import { getRestaurantIds } from "@/utils/restaurants";
+import { getUberEatsRestaurantIds } from "@/utils/restaurants";
 import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { findOrderByCarrierOrderId, updateOrderDispute } from "@/utils/order_processing";
@@ -87,11 +87,12 @@ async function fetchOrdersPage(
   restaurantUUID: string,
   startDate: string,
   endDate: string,
+  nextTable: "liveOrders" | "historyOrders",
   cursor?: string
 ) {
   const pagination: any = {
     limit: 20,
-    nextTable: cursor ? "historyOrders" : "liveOrders"
+    nextTable
   };
 
   if (cursor) {
@@ -111,6 +112,7 @@ async function fetchOrdersPage(
       'Cookie': `sid=${authData.sid}; jwt-session=${authData.jwtSession}; jwt-session-uem=${authData.jwtSessionUem}; cf_clearance=${authData.cfClearance}; selectedRestaurant=${authData.selectedRestaurant}; udi-id=${authData.udiId}; udi-fingerprint=${authData.udiFingerprint}`,
     },
     body: JSON.stringify({
+      operationName: 'ordersV2',
       query: `fragment Orders_LastMessageFragment on Orders_LastMessage {
   sender
   content
@@ -227,26 +229,28 @@ query ordersV2($filters: Orders_OrdersFiltersInput!, $pagination: Orders_OrdersP
   return await response.json();
 }
 
-async function fetchOrders(authData: any, restaurantUUID: string) {
-  console.log('\nFetching orders with pagination...');
+async function fetchOrdersForTable(
+  authData: any,
+  restaurantUUID: string,
+  startDate: string,
+  endDate: string,
+  tableName: "liveOrders" | "historyOrders"
+) {
+  console.log(`\n  Fetching ${tableName}...`);
 
-  const startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  const endDate = new Date().toISOString().split('T')[0];
-  console.log(`Date range: ${startDate} to ${endDate}`);
-
-  let allOrders: any[] = [];
+  let orders: any[] = [];
   let cursor: string | undefined = undefined;
   let pageNumber = 1;
 
   do {
-    console.log(`\n  Fetching page ${pageNumber}${cursor ? ` (cursor: ${cursor})` : ''}...`);
+    console.log(`    Page ${pageNumber}${cursor ? ` (cursor: ${cursor})` : ''}...`);
 
-    const data = await fetchOrdersPage(authData, restaurantUUID, startDate, endDate, cursor);
+    const data = await fetchOrdersPage(authData, restaurantUUID, startDate, endDate, tableName, cursor);
 
-    const orders = data?.data?.ordersV2?.rows || [];
-    allOrders = allOrders.concat(orders);
+    const pageOrders = data?.data?.ordersV2?.rows || [];
+    orders = orders.concat(pageOrders);
 
-    console.log(`  ✓ Fetched ${orders.length} orders (total: ${allOrders.length})`);
+    console.log(`    ✓ Fetched ${pageOrders.length} orders (total: ${orders.length})`);
 
     // Check for next page
     cursor = data?.data?.ordersV2?.paginationResult?.nextCursor;
@@ -260,7 +264,26 @@ async function fetchOrders(authData: any, restaurantUUID: string) {
 
   } while (cursor);
 
-  console.log(`\n✓ Completed fetching all pages: ${allOrders.length} total orders`);
+  console.log(`  ✓ Completed ${tableName}: ${orders.length} total orders`);
+
+  return orders;
+}
+
+async function fetchOrders(authData: any, restaurantUUID: string) {
+  console.log('\nFetching orders with pagination...');
+
+  const startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const endDate = new Date().toISOString().split('T')[0];
+  console.log(`Date range: ${startDate} to ${endDate}`);
+
+  // Fetch both live orders and history orders
+  const liveOrders = await fetchOrdersForTable(authData, restaurantUUID, startDate, endDate, "liveOrders");
+  const historyOrders = await fetchOrdersForTable(authData, restaurantUUID, startDate, endDate, "historyOrders");
+
+  // Combine all orders
+  const allOrders = [...liveOrders, ...historyOrders];
+
+  console.log(`\n✓ Total orders fetched: ${allOrders.length} (${liveOrders.length} live + ${historyOrders.length} history)`);
 
   // Save all orders to file
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -335,7 +358,7 @@ async function main() {
 
   // Continue with order fetching using cached or fresh auth
   try {
-    const restaurantIds = await getRestaurantIds();
+    const restaurantIds = await getUberEatsRestaurantIds();
 
     let totalProcessed = 0;
     let totalSkipped = 0;
@@ -348,7 +371,8 @@ async function main() {
 
       for (const order of orders) {
         try {
-          console.log(`  Processing order ${order.orderId} (${order.restaurant.name})...`);
+          const eaterName = order.eater?.name || 'Unknown';
+          console.log(`  Processing order ${order.orderId} - ${eaterName} (${order.restaurant.name})...`);
 
           // Find order in database
           const dbOrder = await findOrderByCarrierOrderId(order.orderId);
@@ -363,7 +387,7 @@ async function main() {
           const disputeAccepted = order.orderTag === 'DISPUTE_ACCEPTED';
 
           // Update order
-          await updateOrderDispute(order.orderId, disputeAccepted);
+          await updateOrderDispute(order.orderId, disputeAccepted, order.chargebackTotal);
 
           console.log(`    ✓ Updated: disputed=true, dispute_accepted=${disputeAccepted}`);
           totalProcessed++;

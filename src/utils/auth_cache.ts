@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
 interface AuthData {
+  // UberEats fields
   sid?: string;
   jwtSession?: string;
   jwtSessionUem?: string;
@@ -10,14 +11,30 @@ interface AuthData {
   udiId?: string;
   udiFingerprint?: string;
   csrfToken?: string;
+
+  // DoorDash fields
+  ddwebMxPortalToken?: string;
+  portalWebSid?: string;
+  ddDeviceId?: string;
+  ddSessionId?: string;
+  ddDeviceSessionId?: string;
+  ddAttKey?: string;
+  storeId?: string;
+  storeName?: string;
+  businessId?: string;
+  cookies?: string;
+
   timestamp: number;
 }
 
 const AUTH_CACHE_DIR = join(process.cwd(), '.cache');
-const AUTH_CACHE_FILE = join(AUTH_CACHE_DIR, 'ubereats_auth.json');
 const MAX_AGE_MS = 23 * 60 * 60 * 1000; // 23 hours
 
-export function saveAuthCache(authData: Omit<AuthData, 'timestamp'>): void {
+function getAuthCacheFile(platform: string = 'ubereats'): string {
+  return join(AUTH_CACHE_DIR, `${platform}_auth.json`);
+}
+
+export function saveAuthCache(authData: Omit<AuthData, 'timestamp'>, platform: string = 'ubereats'): void {
   try {
     // Create cache directory if it doesn't exist
     if (!existsSync(AUTH_CACHE_DIR)) {
@@ -29,36 +46,39 @@ export function saveAuthCache(authData: Omit<AuthData, 'timestamp'>): void {
       timestamp: Date.now()
     };
 
-    writeFileSync(AUTH_CACHE_FILE, JSON.stringify(cacheData, null, 2));
-    console.log('\n✓ Authentication cached successfully');
+    const authCacheFile = getAuthCacheFile(platform);
+    writeFileSync(authCacheFile, JSON.stringify(cacheData, null, 2));
+    console.log(`\n✓ ${platform} authentication cached successfully`);
   } catch (error) {
-    console.error('\n⚠️  Failed to save auth cache:', error);
+    console.error(`\n⚠️  Failed to save ${platform} auth cache:`, error);
   }
 }
 
-export function loadAuthCache(): Omit<AuthData, 'timestamp'> | null {
+export function loadAuthCache(platform: string = 'ubereats'): Omit<AuthData, 'timestamp'> | null {
   try {
-    if (!existsSync(AUTH_CACHE_FILE)) {
-      console.log('\n⚠️  No cached authentication found');
+    const authCacheFile = getAuthCacheFile(platform);
+
+    if (!existsSync(authCacheFile)) {
+      console.log(`\n⚠️  No cached ${platform} authentication found`);
       return null;
     }
 
-    const cacheData: AuthData = JSON.parse(readFileSync(AUTH_CACHE_FILE, 'utf-8'));
+    const cacheData: AuthData = JSON.parse(readFileSync(authCacheFile, 'utf-8'));
     const age = Date.now() - cacheData.timestamp;
 
     if (age > MAX_AGE_MS) {
       const hoursOld = Math.floor(age / (60 * 60 * 1000));
-      console.log(`\n⚠️  Cached authentication expired (${hoursOld} hours old)`);
+      console.log(`\n⚠️  Cached ${platform} authentication expired (${hoursOld} hours old)`);
       return null;
     }
 
     const hoursRemaining = Math.floor((MAX_AGE_MS - age) / (60 * 60 * 1000));
-    console.log(`\n✓ Using cached authentication (valid for ${hoursRemaining} more hours)`);
+    console.log(`\n✓ Using cached ${platform} authentication (valid for ${hoursRemaining} more hours)`);
 
     const { timestamp, ...authData } = cacheData;
     return authData;
   } catch (error) {
-    console.error('\n⚠️  Failed to load auth cache:', error);
+    console.error(`\n⚠️  Failed to load ${platform} auth cache:`, error);
     return null;
   }
 }

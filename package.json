@@ -5,6 +5,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "ubereats": "ts-node -r tsconfig-paths/register src/projects/ubereats/index.ts",
+    "doordash": "ts-node -r tsconfig-paths/register src/projects/doordash/index.ts",
+    "all": "npm run ubereats && npm run doordash",
     "process-orders": "ts-node -r tsconfig-paths/register src/projects/testing/index.ts"
   },
   "keywords": [],
