@@ -1,11 +1,23 @@
 import { supabase } from './supabase';
 
-export async function findOrderByCarrierOrderId(orderId: string) {
-  const { data, error } = await supabase
+export async function findOrderByCarrierOrderId(orderId: string, orderDate?: Date) {
+  let query = supabase
     .from('delivery_orders')
     .select('*')
-    .ilike('carrier_order_id', `%${orderId}%`)
-    .single();
+    .ilike('carrier_order_id', `%${orderId}%`);
+
+  // If orderDate is provided, add timeframe filter (±24 hours)
+  if (orderDate) {
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    const startDate = new Date(orderDate.getTime() - oneDayMs).toISOString();
+    const endDate = new Date(orderDate.getTime() + oneDayMs).toISOString();
+
+    query = query
+      .gte('created_at', startDate)
+      .lte('created_at', endDate);
+  }
+
+  const { data, error } = await query.single();
 
   if (error) {
     if (error.code === 'PGRST116') {

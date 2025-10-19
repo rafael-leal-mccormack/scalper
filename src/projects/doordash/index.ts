@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Browser } from "@/core/Browser";
 import { Page } from "puppeteer";
-import { getUberEatsRestaurantIds } from "@/utils/restaurants";
+import { getDoorDashRestaurantIds } from "@/utils/restaurants";
 import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { findOrderByCarrierOrderId, updateOrderDispute } from "@/utils/order_processing";
@@ -395,8 +395,8 @@ async function main() {
 
   // Continue with order fetching using cached or fresh auth
   try {
-    // Use store ID from auth data if available, otherwise try restaurant IDs from utils
-    const storeIds = authData.storeId ? [authData.storeId] : await getUberEatsRestaurantIds();
+    // Always get store IDs from Supabase
+    const storeIds = await getDoorDashRestaurantIds();
 
     let totalProcessed = 0;
     let totalSkipped = 0;
@@ -453,11 +453,14 @@ async function main() {
 
           const orderDetails = response.data;
 
-          // Find order in database using customer name
-          const dbOrder = await findOrderByCarrierOrderId(customerName);
+          const orderDateStr = orders.find((o: any) => o.deliveryUuid === deliveryUuid)?.createdAt;
+          const orderDate = orderDateStr ? new Date(orderDateStr) : undefined;
+
+          // Find order in database using customer name and timeframe
+          const dbOrder = await findOrderByCarrierOrderId(customerName, orderDate);
 
           if (!dbOrder) {
-            console.log(`    ⚠️  Order not found in database (searched by customer name), skipping`);
+            console.log(`    ⚠️  Order not found in database (searched by customer name${orderDate ? ' with timeframe' : ''}), skipping`);
             totalSkipped++;
             continue;
           }

@@ -374,11 +374,22 @@ async function main() {
           const eaterName = order.eater?.name || 'Unknown';
           console.log(`  Processing order ${order.orderId} - ${eaterName} (${order.restaurant.name})...`);
 
-          // Find order in database
-          const dbOrder = await findOrderByCarrierOrderId(order.orderId);
+          // Parse order date from requestedAt field
+          // Format: "10/17/2025, 11:25 PM"
+          let orderDate: Date | undefined;
+          if (order.requestedAt) {
+            try {
+              orderDate = new Date(order.requestedAt);
+            } catch (e) {
+              console.log(`    ⚠️  Failed to parse order date: ${order.requestedAt}`);
+            }
+          }
+
+          // Find order in database using order ID and timeframe
+          const dbOrder = await findOrderByCarrierOrderId(order.orderId, orderDate);
 
           if (!dbOrder) {
-            console.log(`    ⚠️  Order not found in database, skipping`);
+            console.log(`    ⚠️  Order not found in database${orderDate ? ' (with timeframe)' : ''}, skipping`);
             totalSkipped++;
             continue;
           }
