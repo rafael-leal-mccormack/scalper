@@ -3,6 +3,11 @@ import { join } from 'path';
 
 interface AuthData {
   // UberEats fields
+  csrfToken?: string;
+  cookies?: Record<string, string> | string; // Can be object or string depending on platform
+  headers?: Record<string, string>; // Captured headers from browser request
+
+  // Legacy UberEats fields (for backwards compatibility)
   sid?: string;
   jwtSession?: string;
   jwtSessionUem?: string;
@@ -10,7 +15,6 @@ interface AuthData {
   selectedRestaurant?: string;
   udiId?: string;
   udiFingerprint?: string;
-  csrfToken?: string;
 
   // DoorDash fields
   ddwebMxPortalToken?: string;
@@ -22,7 +26,6 @@ interface AuthData {
   storeId?: string;
   storeName?: string;
   businessId?: string;
-  cookies?: string;
 
   timestamp: number;
 }
