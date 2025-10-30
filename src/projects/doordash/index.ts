@@ -4,26 +4,25 @@ import { Page } from "puppeteer";
 import { getDoorDashRestaurantIds } from "@/utils/restaurants";
 import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { findOrderByCarrierOrderId, updateOrderDispute } from "@/utils/order_processing";
+import { findOrderByCarrierOrderId, updateOrderDispute, insertOrdersBulk } from "@/utils/order_processing";
 import { loadAuthCache, saveAuthCache } from "@/utils/auth_cache";
 
-async function login(browser: Browser, page: Page) {
-  const username = process.env.DOORDASH_USERNAME || process.env.USERNAME;
+async function login(browser: Browser, page: Page, email: string) {
   const password = process.env.DOORDASH_PASSWORD;
 
-  if (!username) {
-    throw new Error("DOORDASH_USERNAME or USERNAME must be set in .env file");
+  if (!email) {
+    throw new Error("Email is required for DoorDash login");
   }
 
   if (!password) {
     throw new Error("DOORDASH_PASSWORD must be set in .env file");
   }
 
-  console.log("Starting DoorDash login...");
+  console.log(`Starting DoorDash login for ${email}...`);
 
   // Wait for email input to be visible
   await page.waitForSelector('[data-anchor-id="IdentityLoginPageEmailField"]', { timeout: 10000 });
-  await page.type('[data-anchor-id="IdentityLoginPageEmailField"]', username);
+  await page.type('[data-anchor-id="IdentityLoginPageEmailField"]', email);
 
   // Click continue to move to password field
   await page.click('#merchant-login-submit-button');
@@ -350,152 +349,221 @@ async function fetchOrderDetails(authData: any, storeId: string, deliveryUuid: s
 }
 
 async function main() {
-  // Try to load cached authentication first
-  let authData = loadAuthCache('doordash');
+  // Get store IDs with restaurant mappings from Supabase
+  const storeMappings = await getDoorDashRestaurantIds();
 
-  // If no valid cache, perform login
-  if (!authData) {
-    const browser = new Browser();
-
-    try {
-      console.log("Launching browser...");
-      await browser.launch(false); // Debug mode - show browser
-
-      const page = await browser.newPage();
-
-      console.log("Navigating to DoorDash merchant portal...");
-
-      // Navigate to DoorDash merchant login page
-      await page.goto("https://merchant-portal.doordash.com/login", {
-        waitUntil: "networkidle2",
-      });
-
-      await login(browser, page);
-
-      // Navigate to merchant portal after successful login
-      console.log("Navigating to merchant portal...");
-      await page.goto("https://merchant-portal.doordash.com/merchant", {
-        waitUntil: "networkidle2",
-      });
-
-      // Extract authentication data
-      authData = await extractAuthData(page);
-
-      // Save auth to cache
-      saveAuthCache(authData, 'doordash');
-
-      await browser.close();
-      console.log("Browser closed.");
-    } catch (error) {
-      console.error("Error during login:", error);
-      await browser.close();
-      throw error;
+  // Group stores by email
+  const storesByEmail = storeMappings.reduce((acc: any, store) => {
+    const email = store.email;
+    if (!acc[email]) {
+      acc[email] = [];
     }
-  }
+    acc[email].push(store);
+    return acc;
+  }, {});
 
-  // Continue with order fetching using cached or fresh auth
-  try {
-    // Always get store IDs from Supabase
-    const storeIds = await getDoorDashRestaurantIds();
+  const emails = Object.keys(storesByEmail);
+  console.log(`\n📧 Found ${emails.length} unique email(s) with ${storeMappings.length} total store(s)\n`);
 
-    let totalProcessed = 0;
-    let totalSkipped = 0;
-    let totalErrors = 0;
+  let totalProcessed = 0;
+  let totalSkipped = 0;
+  let totalErrors = 0;
 
-    for (const storeId of storeIds) {
-      const orders = await fetchOrders(authData, storeId);
+  // Process each email group separately
+  for (const email of emails) {
+    const stores = storesByEmail[email];
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`📧 Processing ${stores.length} store(s) for email: ${email}`);
+    console.log(`${'='.repeat(60)}\n`);
 
-      console.log(`\n\n🔄 Processing ${orders.length} disputed order items for store ${storeId}...\n`);
+    // Try to load cached authentication for this email
+    const cacheKey = `doordash_${email}`;
+    let authData = loadAuthCache(cacheKey);
 
-      // Group orders by deliveryUuid to avoid duplicate API calls and sum charges
-      const ordersByDelivery = orders.reduce((acc: any, order: any) => {
-        if (!acc[order.deliveryUuid]) {
-          // Clean customer name - remove trailing period if present
-          let customerName = order.customerName || 'Unknown';
-          if (customerName.endsWith('.')) {
-            customerName = customerName.slice(0, -1);
-          }
+    // If no valid cache, perform login
+    if (!authData) {
+      const browser = new Browser();
 
-          acc[order.deliveryUuid] = {
-            deliveryUuid: order.deliveryUuid,
-            customerName,
-            totalAmountCharged: 0,
-            items: []
-          };
-        }
-        acc[order.deliveryUuid].totalAmountCharged += order.amountCharged || 0;
-        acc[order.deliveryUuid].items.push({
-          itemName: order.itemAtFault?.[0]?.name || 'Unknown',
-          amountCharged: order.amountCharged || 0
+      try {
+        console.log(`Launching browser for ${email}...`);
+        await browser.launch(false); // Debug mode - show browser
+
+        const page = await browser.newPage();
+
+        console.log("Navigating to DoorDash merchant portal...");
+
+        // Navigate to DoorDash merchant login page
+        await page.goto("https://merchant-portal.doordash.com/login", {
+          waitUntil: "networkidle2",
         });
-        return acc;
-      }, {});
 
-      const uniqueDeliveries = Object.values(ordersByDelivery);
-      console.log(`  Found ${uniqueDeliveries.length} unique deliveries with disputes\n`);
+        await login(browser, page, email);
 
-      for (const delivery of uniqueDeliveries) {
-        try {
-          const { deliveryUuid, customerName, totalAmountCharged, items } = delivery as any;
+        // Navigate to merchant portal after successful login
+        console.log("Navigating to merchant portal...");
+        await page.goto("https://merchant-portal.doordash.com/merchant", {
+          waitUntil: "networkidle2",
+        });
 
-          console.log(`  Processing delivery ${deliveryUuid} - ${customerName}...`);
-          console.log(`    Total disputed amount from error list: $${(totalAmountCharged / 100).toFixed(2)} (${items.length} items)`);
+        // Extract authentication data
+        authData = await extractAuthData(page);
 
-          // Fetch full order details
-          console.log(`    Fetching order details...`);
-          const response = await fetchOrderDetails(authData, storeId, deliveryUuid);
+        // Save auth to cache with email-specific key
+        saveAuthCache(authData, cacheKey);
 
-          if (!response || response.error || !response.data) {
-            console.log(`    ⚠️  Failed to fetch order details, skipping`);
-            totalErrors++;
-            continue;
-          }
-
-          const orderDetails = response.data;
-
-          const orderDateStr = orders.find((o: any) => o.deliveryUuid === deliveryUuid)?.createdAt;
-          const orderDate = orderDateStr ? new Date(orderDateStr) : undefined;
-
-          // Find order in database using customer name and timeframe
-          const dbOrder = await findOrderByCarrierOrderId(customerName, orderDate);
-
-          if (!dbOrder) {
-            console.log(`    ⚠️  Order not found in database (searched by customer name${orderDate ? ' with timeframe' : ''}), skipping`);
-            totalSkipped++;
-            continue;
-          }
-
-          // Determine if dispute was accepted - if we got a refund, we won
-          const refundAmount = orderDetails.refunds?.unitAmount || 0;
-          const disputeAccepted = refundAmount > 0;
-
-          // Get the total error charge amount (in cents, convert to dollars)
-          const chargebackAmount = (orderDetails.errorCharges?.unitAmount || 0) / 100;
-
-          // Update order
-          await updateOrderDispute(customerName, disputeAccepted, chargebackAmount);
-
-          console.log(`    ✓ Updated: disputed=true, dispute_accepted=${disputeAccepted}, amount=$${chargebackAmount.toFixed(2)}`);
-          totalProcessed++;
-
-          // Small delay between requests to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 500));
-
-        } catch (error) {
-          const { deliveryUuid } = delivery as any;
-          console.error(`    ✗ Error processing delivery ${deliveryUuid}:`, error);
-          totalErrors++;
-        }
+        await browser.close();
+        console.log("Browser closed.");
+      } catch (error) {
+        console.error(`Error during login for ${email}:`, error);
+        await browser.close();
+        totalErrors++;
+        continue; // Skip processing stores for this email
       }
     }
 
-    console.log('\n\n=== Processing Summary ===');
-    console.log(`Processed: ${totalProcessed}`);
-    console.log(`Skipped: ${totalSkipped}`);
-    console.log(`Errors: ${totalErrors}`);
-  } catch (error) {
-    console.error("Error:", error);
+    // Process all stores for this email
+    try {
+      for (const { storeId, restaurantId } of stores) {
+        const orders = await fetchOrders(authData, storeId);
+
+        console.log(`\n\n🔄 Processing ${orders.length} disputed order items for store ${storeId}...\n`);
+
+        // Initialize array to collect orders to insert
+        const ordersToInsert: any[] = [];
+
+        // Group orders by deliveryUuid to avoid duplicate API calls and sum charges
+        const ordersByDelivery = orders.reduce((acc: any, order: any) => {
+          if (!acc[order.deliveryUuid]) {
+            // Clean customer name - remove trailing period if present
+            let customerName = order.customerName || 'Unknown';
+            if (customerName.endsWith('.')) {
+              customerName = customerName.slice(0, -1);
+            }
+
+            acc[order.deliveryUuid] = {
+              deliveryUuid: order.deliveryUuid,
+              customerName,
+              totalAmountCharged: 0,
+              items: []
+            };
+          }
+          acc[order.deliveryUuid].totalAmountCharged += order.amountCharged || 0;
+          acc[order.deliveryUuid].items.push({
+            itemName: order.itemAtFault?.[0]?.name || 'Unknown',
+            amountCharged: order.amountCharged || 0
+          });
+          return acc;
+        }, {});
+
+        const uniqueDeliveries = Object.values(ordersByDelivery);
+        console.log(`  Found ${uniqueDeliveries.length} unique deliveries with disputes\n`);
+
+        for (const delivery of uniqueDeliveries) {
+          try {
+            const { deliveryUuid, customerName, totalAmountCharged, items } = delivery as any;
+
+            console.log(`  Processing delivery ${deliveryUuid} - ${customerName}...`);
+            console.log(`    Total disputed amount from error list: $${(totalAmountCharged / 100).toFixed(2)} (${items.length} items)`);
+
+            // Fetch full order details
+            console.log(`    Fetching order details...`);
+            const response = await fetchOrderDetails(authData, storeId, deliveryUuid);
+
+            if (!response || response.error || !response.data) {
+              console.log(`    ⚠️  Failed to fetch order details, skipping`);
+              totalErrors++;
+              continue;
+            }
+
+            const orderDetails = response.data;
+
+            const orderDateStr = orders.find((o: any) => o.deliveryUuid === deliveryUuid)?.createdAt;
+            const orderDate = orderDateStr ? new Date(orderDateStr) : undefined;
+
+            // Find order in database using delivery UUID, customer name, and timeframe
+            const dbOrder = await findOrderByCarrierOrderId(deliveryUuid, customerName, orderDate);
+
+            if (!dbOrder) {
+              console.log(`    📝 Order not found in database, will be saved...`);
+
+              // Determine if dispute was accepted - if we got a refund, we won
+              const refundAmount = orderDetails.refunds?.unitAmount || 0;
+              const disputeAccepted = refundAmount > 0;
+
+              // Get the total error charge amount (in cents, convert to dollars)
+              const chargebackAmount = (orderDetails.errorCharges?.unitAmount || 0) / 100;
+
+              // Extract items from orderDetails if available
+              const orderItems = orderDetails.items || items || [];
+
+              // Prepare order data for bulk insert
+              const orderData = {
+                carrier: 'doordash',
+                order_number: deliveryUuid,
+                carrier_order_id: deliveryUuid,
+                restaurant_id: restaurantId,
+                customer_name: customerName,
+                disputed: true,
+                dispute_accepted: disputeAccepted,
+                dispute_amount: chargebackAmount,
+                items: orderItems,
+                created_at: orderDate ? orderDate.toISOString() : undefined
+              };
+
+              ordersToInsert.push(orderData);
+              continue;
+            }
+
+            // Determine if dispute was accepted - if we got a refund, we won
+            const refundAmount = orderDetails.refunds?.unitAmount || 0;
+            const disputeAccepted = refundAmount > 0;
+
+            // Get the total error charge amount (in cents, convert to dollars)
+            const chargebackAmount = (orderDetails.errorCharges?.unitAmount || 0) / 100;
+
+            // Update the found order
+            await updateOrderDispute(dbOrder.id, disputeAccepted, chargebackAmount);
+
+            console.log(`    ✓ Updated: disputed=true, dispute_accepted=${disputeAccepted}, amount=$${chargebackAmount.toFixed(2)}`);
+            totalProcessed++;
+
+            // Small delay between requests to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+          } catch (error) {
+            const { deliveryUuid } = delivery as any;
+            console.error(`    ✗ Error processing delivery ${deliveryUuid}:`, error);
+            totalErrors++;
+          }
+        }
+
+        // Bulk insert orders that weren't found in the database
+        if (ordersToInsert.length > 0) {
+          console.log(`\n  💾 Bulk inserting ${ordersToInsert.length} new orders for store ${storeId}...`);
+          const result = await insertOrdersBulk(ordersToInsert);
+          
+          if (result.errors.length > 0) {
+            console.error(`  ⚠️  ${result.errors.length} errors during bulk insert`);
+            totalErrors += result.errors.length;
+          }
+          
+          totalProcessed += result.inserted;
+          console.log(`  ✓ Successfully inserted ${result.inserted} orders`);
+        }
+      }
+
+    } catch (error) {
+      console.error(`Error processing stores for ${email}:`, error);
+      totalErrors++;
+    }
+
+    console.log(`\n✓ Completed processing for email: ${email}\n`);
   }
+
+  console.log('\n\n=== Processing Summary ===');
+  console.log(`Processed: ${totalProcessed}`);
+  console.log(`Skipped: ${totalSkipped}`);
+  console.log(`Errors: ${totalErrors}`);
 }
 
 main();

@@ -4,7 +4,7 @@ import { Page } from "puppeteer";
 import { getUberEatsRestaurantIds } from "@/utils/restaurants";
 import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { findOrderByCarrierOrderId, updateOrderDispute } from "@/utils/order_processing";
+import { findOrderByCarrierOrderId, updateOrderDispute, insertOrdersBulk } from "@/utils/order_processing";
 import { loadAuthCache, saveAuthCache } from "@/utils/auth_cache";
 
 async function login(browser: Browser, page: Page) {
@@ -358,16 +358,19 @@ async function main() {
 
   // Continue with order fetching using cached or fresh auth
   try {
-    const restaurantIds = await getUberEatsRestaurantIds();
+    const restaurantMappings = await getUberEatsRestaurantIds();
 
     let totalProcessed = 0;
     let totalSkipped = 0;
     let totalErrors = 0;
 
-    for (const restaurantId of restaurantIds) {
-      const orders = await fetchOrders(authData, restaurantId);
+    for (const { restaurantUUID, restaurantId } of restaurantMappings) {
+      const orders = await fetchOrders(authData, restaurantUUID);
 
-      console.log(`\n\n🔄 Processing ${orders.length} orders for restaurant ${restaurantId}...\n`);
+      console.log(`\n\n🔄 Processing ${orders.length} orders for restaurant ${restaurantUUID}...\n`);
+
+      // Initialize array to collect orders to insert
+      const ordersToInsert: any[] = [];
 
       for (const order of orders) {
         try {
@@ -385,20 +388,55 @@ async function main() {
             }
           }
 
-          // Find order in database using order ID and timeframe
-          const dbOrder = await findOrderByCarrierOrderId(order.orderId, orderDate);
+          // Find order in database using order ID, eater name, and timeframe
+          const dbOrder = await findOrderByCarrierOrderId(order.orderId, eaterName, orderDate);
 
           if (!dbOrder) {
-            console.log(`    ⚠️  Order not found in database${orderDate ? ' (with timeframe)' : ''}, skipping`);
-            totalSkipped++;
+            console.log(`    📝 Order not found in database, will be saved...`);
+
+            // Determine if dispute was accepted
+            const disputeAccepted = order.orderTag === 'DISPUTE_ACCEPTED' || order.orderTag === 'UBER_REFUNDED';
+
+            // Parse dispute amount - chargebackTotal can be a string like "$2.68" or number
+            let disputeAmount: number | null = null;
+            if (order.chargebackTotal) {
+              if (typeof order.chargebackTotal === 'string') {
+                disputeAmount = parseFloat(order.chargebackTotal.replace(/[$,]/g, '')) || null;
+              } else {
+                disputeAmount = order.chargebackTotal;
+              }
+            }
+
+            // Extract items from order if available (this structure may vary)
+            const orderItems = order.items || [];
+
+            // Prepare order data for bulk insert
+            const orderData = {
+              carrier: 'uber_eats',
+              order_number: order.orderId,
+              carrier_order_id: order.orderId,
+              restaurant_id: restaurantId,
+              customer_name: eaterName,
+              disputed: true,
+              dispute_accepted: disputeAccepted,
+              dispute_amount: disputeAmount,
+              items: orderItems,
+              created_at: orderDate ? orderDate.toISOString() : undefined
+            };
+
+            ordersToInsert.push(orderData);
             continue;
           }
 
           // Determine if dispute was accepted
-          const disputeAccepted = order.orderTag === 'DISPUTE_ACCEPTED';
+          const disputeAccepted = order.orderTag === 'DISPUTE_ACCEPTED' || order.orderTag === 'UBER_REFUNDED';
 
-          // Update order
-          await updateOrderDispute(order.orderId, disputeAccepted, order.chargebackTotal);
+          // Update the found order
+          await updateOrderDispute(
+            dbOrder.id,
+            disputeAccepted, 
+            order.chargebackTotal
+          );
 
           console.log(`    ✓ Updated: disputed=true, dispute_accepted=${disputeAccepted}`);
           totalProcessed++;
@@ -407,6 +445,20 @@ async function main() {
           console.error(`    ✗ Error processing order ${order.orderId}:`, error);
           totalErrors++;
         }
+      }
+
+      // Bulk insert orders that weren't found in the database
+      if (ordersToInsert.length > 0) {
+        console.log(`\n  💾 Bulk inserting ${ordersToInsert.length} new orders for restaurant ${restaurantUUID}...`);
+        const result = await insertOrdersBulk(ordersToInsert);
+        
+        if (result.errors.length > 0) {
+          console.error(`  ⚠️  ${result.errors.length} errors during bulk insert`);
+          totalErrors += result.errors.length;
+        }
+        
+        totalProcessed += result.inserted;
+        console.log(`  ✓ Successfully inserted ${result.inserted} orders`);
       }
     }
 

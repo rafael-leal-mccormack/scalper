@@ -11,6 +11,11 @@ interface UberEatsOrder {
     name: string;
     uuid: string;
   };
+  eater: {
+    name: string;
+  };
+  requestedAt: string;
+  chargebackTotal: string | null;
 }
 
 interface UberEatsResponse {
@@ -46,11 +51,21 @@ async function processOrders() {
       try {
         console.log(`  Processing order ${order.orderId} (${order.restaurant.name})...`);
 
+        // Parse order date
+        let orderDate: Date | undefined;
+        if (order.requestedAt) {
+          try {
+            orderDate = new Date(order.requestedAt);
+          } catch (e) {
+            console.log(`    ⚠️  Failed to parse order date: ${order.requestedAt}`);
+          }
+        }
+
         // Find order in database
-        const dbOrder = await findOrderByCarrierOrderId(order.orderId);
+        const dbOrder = await findOrderByCarrierOrderId(order.orderId, order.eater.name, orderDate);
 
         if (!dbOrder) {
-          console.log(`    �  Order not found in database, skipping`);
+          console.log(`    ⚠️  Order not found in database, skipping`);
           skipped++;
           continue;
         }
@@ -58,14 +73,18 @@ async function processOrders() {
         // Determine if dispute was accepted
         const disputeAccepted = order.orderTag === 'DISPUTE_ACCEPTED';
 
-        // Update order
-        await updateOrderDispute(order.orderId, disputeAccepted);
+        // Update the found order
+        await updateOrderDispute(
+          dbOrder.id,
+          disputeAccepted,
+          order.chargebackTotal || 0
+        );
 
-        console.log(`     Updated: disputed=true, dispute_accepted=${disputeAccepted}`);
+        console.log(`     ✓ Updated: disputed=true, dispute_accepted=${disputeAccepted}`);
         processed++;
 
       } catch (error) {
-        console.error(`     Error processing order ${order.orderId}:`, error);
+        console.error(`     ✗ Error processing order ${order.orderId}:`, error);
         errors++;
       }
     }
